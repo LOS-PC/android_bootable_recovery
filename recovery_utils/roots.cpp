@@ -26,10 +26,12 @@
 #include <unistd.h>
 #include <sys/mount.h>
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
 
+#include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
@@ -328,6 +330,21 @@ int format_volume(const std::string& volume, const std::string& directory,
       LOG(INFO) << "format_volume: wipe metadata encrypted " << v->blk_device << " with size "
                 << device_size;
       return 0;
+    }
+    // Disks without discard (hard drives, most USB drives): zeroing the start is enough for init
+    // to see the partition as wiped (partition_wiped) and let vold format it, instead of an
+    // unencrypted ext4 from mke2fs that the next boot encrypts in place, block by block. The
+    // rest stays unreadable, as its key was in the metadata partition, which is wiped too.
+    if (device_size > 0) {
+      static constexpr size_t kZeroBytes = 1024 * 1024;
+      std::vector<char> zeros(std::min<int64_t>(kZeroBytes, device_size), 0);
+      if (lseek(fd.get(), 0, SEEK_SET) == 0 &&
+          android::base::WriteFully(fd.get(), zeros.data(), zeros.size()) && fsync(fd.get()) == 0) {
+        LOG(INFO) << "format_volume: no discard on " << v->blk_device
+                  << ", cleared its start for vold to format it";
+        return 0;
+      }
+      PLOG(ERROR) << "format_volume: failed to clear the start of " << v->blk_device;
     }
   }
 
